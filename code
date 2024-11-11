@@ -1,0 +1,134 @@
+// Initialize the area of interest from imported table
+var aoi = table;
+
+// Function to add NDVI band and apply quality masks
+function addNDVI(image) {
+  // Calculate NDVI
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  
+  // Get cloud mask from QA60 band
+  var cloudMask = image.select('QA60').bitwiseAnd(1 << 10).eq(0);
+  
+  // Combine masks and apply to NDVI
+  var ndviMasked = ndvi.updateMask(cloudMask);
+  
+  return image.addBands(ndviMasked);
+}
+
+// Function to process images for a given month
+function processMonth(year, month) {
+  // Set up date range
+  var startDate = ee.Date.fromYMD(year, month, 1);
+  var endDate = startDate.advance(1, 'month');
+  
+  // Filter and process Sentinel-2 collection
+  var s2Collection = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+    .filterBounds(aoi)
+    .filterDate(startDate, endDate)
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))  // Increased threshold slightly
+    .map(addNDVI);
+    
+  return s2Collection;
+}
+
+// Set up time period
+var years = [2018, 2019, 2020, 2021, 2022, 2023];
+var months = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+
+// Create export tasks
+years.forEach(function(year) {
+  months.forEach(function(month) {
+    // Get collection for current month
+    var monthCollection = processMonth(year, month);
+    
+    // Check if collection has images before processing
+    var hasImages = monthCollection.size();
+    
+    hasImages.evaluate(function(count) {
+      if (count > 0) {
+        // Calculate monthly median NDVI (more robust than mean)
+        var monthlyNDVI = monthCollection.select('NDVI').median();
+        
+        // Format month string for filename
+        var monthStr = month < 10 ? '0' + month : month.toString();
+        
+        // Set up export task
+        Export.image.toDrive({
+          image: monthlyNDVI,
+          description: 'AltoParaguay_NDVI_' + year + '_' + monthStr,
+          folder: 'AltoParaguay_NDVI',
+          scale: 20,  // Sentinel-2 native resolution
+          region: aoi,
+          maxPixels: 1e13,
+          fileFormat: 'GeoTIFF',
+          formatOptions: {
+            cloudOptimized: true
+          }
+        });
+        
+        print('Created export task for:', year, month, '(Images found:', count, ')');
+      } else {
+        print('Skipping', year, month, '- No valid images found');
+      }
+    });
+  });
+});
+
+// Add visualization for preview
+var ndviVis = {
+  min: -0.2,
+  max: 0.8,
+  palette: [
+    '#d73027', '#f46d43', '#fdae61', '#fee08b', '#ffffbf',
+    '#d9ef8b', '#a6d96a', '#66bd63', '#1a9850'
+  ]
+};
+
+// Show AOI boundary
+Map.centerObject(aoi, 9);
+Map.addLayer(aoi, {color: 'red'}, 'Alto Paraguay Boundary');
+
+// Let's check data availability for the most recent complete month
+var previewYear = 2023;
+var previewMonth = 10;  // October 2023
+var previewCollection = processMonth(previewYear, previewMonth);
+
+previewCollection.size().evaluate(function(count) {
+  if (count > 0) {
+    var previewNDVI = previewCollection.select('NDVI').median();
+    
+    Map.addLayer(
+      previewNDVI.clip(aoi), 
+      ndviVis, 
+      'NDVI Preview (Oct 2023)'
+    );
+    
+    // Add a simple chart to preview data availability
+    var chart = ui.Chart.image.series({
+      imageCollection: previewCollection.select('NDVI'),
+      region: aoi,
+      reducer: ee.Reducer.median(),
+      scale: 100
+    }).setOptions({
+      title: 'NDVI Values for October 2023',
+      vAxis: {title: 'NDVI'},
+      hAxis: {title: 'Date'}
+    });
+    
+    print(chart);
+  } else {
+    print('No valid preview data available for October 2023');
+  }
+});
+
+// Add UI elements to show processing status
+var panel = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px'
+  }
+});
+
+var label = ui.Label('Processing status will appear in the console');
+panel.add(label);
+Map.add(panel);
